@@ -190,8 +190,12 @@ async def x402_manifest() -> JSONResponse:
 async def time_context(
     tz: str | None = Query(default=None, description="IANA timezone, e.g. America/New_York"),
     systems: str | None = Query(default=None, description="Comma-separated systems to include"),
+    birth_date: str | None = Query(default=None, description="Birth date YYYY-MM-DD for biorhythm cycles"),
 ) -> JSONResponse:
     """Full temporal context across 15+ time systems. ~2ms."""
+    import os as _os
+    if birth_date:
+        _os.environ["CLOCK_BIRTH_DATE"] = birth_date
     zone = _resolve_tz(tz)
     dt = datetime.now(tz=zone)
     ctx = assemble(dt=dt)
