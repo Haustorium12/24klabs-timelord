@@ -18,11 +18,17 @@ Network: eip155:8453
 """
 
 from __future__ import annotations
+import base64
 import json
 import logging
 import os
+import time
+import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import jwt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import anthropic
 from fastapi import FastAPI, Query, Request
@@ -46,19 +52,58 @@ log = logging.getLogger("timelord")
 # Config from env
 # ---------------------------------------------------------------------------
 
-WALLET_ADDRESS   = os.environ.get("WALLET_ADDRESS", "0xe73D86f185bE79a33b0318d881B71f2a24371114")
-X402_NETWORK     = os.environ.get("X402_NETWORK", "eip155:8453")
-FACILITATOR_URL  = os.environ.get("FACILITATOR_URL", "https://api.cdp.coinbase.com/platform/v2/x402/")
-ANTHROPIC_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
-DEFAULT_TZ       = os.environ.get("CLOCK_TZ", "UTC")
+WALLET_ADDRESS       = os.environ.get("WALLET_ADDRESS", "0xe73D86f185bE79a33b0318d881B71f2a24371114")
+X402_NETWORK         = os.environ.get("X402_NETWORK", "eip155:8453")
+FACILITATOR_URL      = os.environ.get("FACILITATOR_URL", "https://api.cdp.coinbase.com/platform/v2/x402/")
+ANTHROPIC_KEY        = os.environ.get("ANTHROPIC_API_KEY", "")
+DEFAULT_TZ           = os.environ.get("CLOCK_TZ", "UTC")
+CDP_API_KEY_NAME     = os.environ.get("CDP_API_KEY_NAME", "")
+CDP_API_KEY_PRIVATE  = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "")
 
 USDC_ASSET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+# ---------------------------------------------------------------------------
+# CDP JWT auth
+# ---------------------------------------------------------------------------
+
+def _cdp_create_headers() -> dict:
+    """Build CDP Ed25519 JWT auth headers for x402 facilitator calls."""
+    if not CDP_API_KEY_NAME or not CDP_API_KEY_PRIVATE:
+        return {"verify": {}, "settle": {}, "supported": {}, "bazaar": {}}
+
+    private_key_bytes = base64.b64decode(CDP_API_KEY_PRIVATE)
+    private_key = Ed25519PrivateKey.from_private_bytes(private_key_bytes[:32])
+
+    now = int(time.time())
+    payload = {
+        "sub": CDP_API_KEY_NAME,
+        "iss": "cdp",
+        "nbf": now,
+        "exp": now + 120,
+        "uris": [
+            "GET api.cdp.coinbase.com/platform/v2/x402/supported",
+            "POST api.cdp.coinbase.com/platform/v2/x402/verify",
+            "POST api.cdp.coinbase.com/platform/v2/x402/settle",
+        ],
+    }
+    token = jwt.encode(
+        payload,
+        private_key,
+        algorithm="EdDSA",
+        headers={"kid": CDP_API_KEY_NAME, "nonce": uuid.uuid4().hex[:16]},
+    )
+    auth_headers = {"Authorization": f"Bearer {token}"}
+    return {"verify": auth_headers, "settle": auth_headers, "supported": auth_headers, "bazaar": auth_headers}
+
 
 # ---------------------------------------------------------------------------
 # x402 setup
 # ---------------------------------------------------------------------------
 
-_facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=FACILITATOR_URL))
+_facilitator = HTTPFacilitatorClient({
+    "url": FACILITATOR_URL,
+    "create_headers": _cdp_create_headers,
+})
 _server = x402ResourceServer(_facilitator)
 _server.register(X402_NETWORK, ExactEvmServerScheme())
 
