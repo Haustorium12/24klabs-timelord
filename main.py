@@ -41,6 +41,8 @@ from x402.http.middleware.fastapi import PaymentMiddlewareASGI
 from x402.http.types import RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 from x402.server import x402ResourceServer
+from x402.extensions.bazaar import bazaar_resource_server_extension
+from x402.extensions.bazaar.resource_service import declare_discovery_extension, OutputConfig
 
 from clock.engine.assemble import assemble
 from clock.engine.renderer import to_dict
@@ -106,25 +108,61 @@ _facilitator = HTTPFacilitatorClient({
 })
 _server = x402ResourceServer(_facilitator)
 _server.register(X402_NETWORK, ExactEvmServerScheme())
+_server.register_extension(bazaar_resource_server_extension)
+
+# Input schemas for the Bazaar discovery declaration (POST variants carry these).
+_TIME_SCHEMA = {
+    "properties": {
+        "tz":         {"type": "string", "description": "IANA timezone, e.g. America/New_York"},
+        "systems":    {"type": "string", "description": "Comma-separated systems to include (optional)"},
+        "birth_date": {"type": "string", "description": "YYYY-MM-DD for biorhythm cycles (optional)"},
+    },
+}
+_TZ_SCHEMA  = {"properties": {"tz": {"type": "string", "description": "IANA timezone key"}}}
+_ASK_SCHEMA = {"properties": {"question": {"type": "string", "description": "A temporal question"}}, "required": ["question"]}
+
 
 def _route(price: str, description: str) -> RouteConfig:
     return RouteConfig(
-        accepts=[PaymentOption(
-            scheme="exact",
-            price=price,
-            network=X402_NETWORK,
-            pay_to=WALLET_ADDRESS,
-        )],
+        accepts=[PaymentOption(scheme="exact", price=price, network=X402_NETWORK, pay_to=WALLET_ADDRESS)],
         description=description,
     )
 
+
+def _route_bz(price: str, description: str, name: str, disc) -> RouteConfig:
+    return RouteConfig(
+        accepts=[PaymentOption(scheme="exact", price=price, network=X402_NETWORK, pay_to=WALLET_ADDRESS)],
+        description=description, service_name=name, tags=["time", "24klabs"], extensions=disc,
+    )
+
+
+_disc_time = declare_discovery_extension(
+    input={"tz": "America/New_York"}, input_schema=_TIME_SCHEMA, body_type="json",
+    output=OutputConfig(example={"timezone": "America/New_York", "systems": {"unix": 1769000000}}),
+)
+_disc_tz = declare_discovery_extension(
+    input={"tz": "America/New_York"}, input_schema=_TZ_SCHEMA, body_type="json",
+    output=OutputConfig(example={"timezone": "America/New_York", "utc_offset_hours": -5, "is_dst_now": False}),
+)
+_disc_summary = declare_discovery_extension(
+    input={"tz": "UTC"}, input_schema=_TZ_SCHEMA, body_type="json",
+    output=OutputConfig(example={"result": "The moment holds a quiet convergence..."}),
+)
+_disc_ask = declare_discovery_extension(
+    input={"question": "How many days until the solstice?"}, input_schema=_ASK_SCHEMA, body_type="json",
+    output=OutputConfig(example={"result": "The solstice arrives in ..."}),
+)
+
 _routes = {
-    # Core time — $0.001
-    "GET /time":          _route("$0.001", "Full temporal context — 15+ time systems"),
-    "GET /timezone":      _route("$0.001", "Timezone intelligence — offsets, DST, transitions"),
-    # Intelligence — $0.05
-    "GET /summary":       _route("$0.050", "Time Lord synthesized interpretation of the current moment"),
-    "POST /ask":          _route("$0.050", "Ask the Time Lord a temporal question"),
+    # GET -- existing interface, kept for backward compatibility (no Bazaar declaration).
+    "GET /time":     _route("$0.001", "Full temporal context — 15+ time systems"),
+    "GET /timezone": _route("$0.001", "Timezone intelligence — offsets, DST, transitions"),
+    "GET /summary":  _route("$0.050", "Time Lord synthesized interpretation of the current moment"),
+    # POST -- Bazaar-discoverable variants (valid method for CDP indexing).
+    "POST /time":     _route_bz("$0.001", "Full temporal context — 15+ time systems", "Temporal Context", _disc_time),
+    "POST /timezone": _route_bz("$0.001", "Timezone intelligence — offsets, DST, transitions", "Timezone Intelligence", _disc_tz),
+    "POST /summary":  _route_bz("$0.050", "Time Lord synthesized interpretation of the current moment", "Time Lord Summary", _disc_summary),
+    "POST /ask":      _route_bz("$0.050", "Ask the Time Lord a temporal question", "Ask the Time Lord", _disc_ask),
 }
 
 # ---------------------------------------------------------------------------
@@ -343,3 +381,36 @@ async def ask(
         messages=[{"role": "user", "content": prompt}]
     )
     return message.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# POST variants -- Bazaar-discoverable (valid method for CDP indexing).
+# Thin wrappers over the existing GET handlers; accept an optional JSON body.
+# ---------------------------------------------------------------------------
+
+class TimeBody(BaseModel):
+    tz: str | None = None
+    systems: str | None = None
+    birth_date: str | None = None
+
+
+class TzBody(BaseModel):
+    tz: str | None = None
+
+
+@app.post("/time")
+async def time_context_post(body: TimeBody | None = None) -> JSONResponse:
+    b = body or TimeBody()
+    return await time_context(tz=b.tz, systems=b.systems, birth_date=b.birth_date)
+
+
+@app.post("/timezone")
+async def timezone_info_post(body: TzBody | None = None) -> JSONResponse:
+    b = body or TzBody()
+    return await timezone_info(tz=b.tz)
+
+
+@app.post("/summary", response_class=PlainTextResponse)
+async def summary_post(body: TzBody | None = None) -> str:
+    b = body or TzBody()
+    return await summary(tz=b.tz)
