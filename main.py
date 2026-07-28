@@ -57,7 +57,7 @@ log = logging.getLogger("timelord")
 WALLET_ADDRESS       = os.environ.get("WALLET_ADDRESS", "0xe73D86f185bE79a33b0318d881B71f2a24371114")
 X402_NETWORK         = os.environ.get("X402_NETWORK", "eip155:8453")
 FACILITATOR_URL      = os.environ.get("FACILITATOR_URL", "https://api.cdp.coinbase.com/platform/v2/x402/")
-ANTHROPIC_KEY        = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_KEY        = os.environ.get("ANTHROPIC_API_KEY", "").strip()  # strip: trailing whitespace/newline in the key makes the x-api-key header illegal -> h11.LocalProtocolError -> APIConnectionError -> 500
 DEFAULT_TZ           = os.environ.get("CLOCK_TZ", "UTC")
 CDP_API_KEY_NAME     = os.environ.get("CDP_API_KEY_NAME", "")
 CDP_API_KEY_PRIVATE  = os.environ.get("CDP_API_KEY_PRIVATE_KEY", "")
@@ -208,6 +208,27 @@ astronomical events, cultural rhythms, and cosmic deep time.
 Your voice: warm, precise, ancient knowing. Never robotic. Never verbose.
 You illuminate the moment. 150 words maximum. Use them well."""
 
+
+def _timelord_say(prompt: str):
+    """Call Claude Haiku for the Time Lord. Returns the reply text, or a 503
+    PlainTextResponse if the LLM call fails -- so a bad key or connection error
+    degrades gracefully instead of surfacing as a raw 500 stack trace."""
+    client = _anthropic_client()
+    try:
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system=_TIMELORD_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.APIError as e:
+        log.error("Time Lord LLM call failed: %s: %s", type(e).__name__, e)
+        return PlainTextResponse(
+            "The Time Lord is momentarily beyond reach. Try again shortly.",
+            status_code=503,
+        )
+    return "".join(b.text for b in message.content if hasattr(b, "text")) or "The moment resists words."
+
 # ---------------------------------------------------------------------------
 # Public endpoints
 # ---------------------------------------------------------------------------
@@ -340,16 +361,8 @@ async def summary(
     ctx = assemble(dt=dt)
     data = to_dict(ctx)
 
-    client = _anthropic_client()
     prompt = f"The current temporal context:\n\n{json.dumps(data, indent=2, default=str)}\n\nSynthesize the moment. What converges? What matters right now?"
-
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
-        system=_TIMELORD_SYSTEM,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return message.content[0].text
+    return _timelord_say(prompt)
 
 
 from pydantic import BaseModel
@@ -371,16 +384,8 @@ async def ask(
     ctx = assemble(dt=dt)
     data = to_dict(ctx)
 
-    client = _anthropic_client()
     prompt = f"Current temporal context:\n\n{json.dumps(data, indent=2, default=str)}\n\nQuestion: {body.question}"
-
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
-        system=_TIMELORD_SYSTEM,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return message.content[0].text
+    return _timelord_say(prompt)
 
 
 # ---------------------------------------------------------------------------
