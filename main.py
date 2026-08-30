@@ -419,3 +419,27 @@ async def timezone_info_post(body: TzBody | None = None) -> JSONResponse:
 async def summary_post(body: TzBody | None = None) -> str:
     b = body or TzBody()
     return await summary(tz=b.tz)
+
+
+# ---------------------------------------------------------------------------
+# Nonce ledger -- append-only delivery log for paid requests (see ledger.py,
+# identical twin of 24klabs-api's). Wraps the WHOLE app, so each row carries
+# the status and bytes the payer actually received. Must stay the last thing
+# in this file: routes above bind to the FastAPI instance before the rebind.
+# ---------------------------------------------------------------------------
+from ledger import NonceLedgerASGI
+
+
+def _ledger_price(path, raw_query):
+    """Advertised USD price for a gated path -- read from the same _routes
+    table the 402 challenge is built from, so the two can never disagree."""
+    rc = _routes.get("POST " + (path or "")) or _routes.get("GET " + (path or ""))
+    if rc is None:
+        return None
+    try:
+        return float(str(rc.accepts[0].price).lstrip("$"))
+    except Exception:
+        return None
+
+
+app = NonceLedgerASGI(app, price_fn=_ledger_price)
