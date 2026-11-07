@@ -243,6 +243,39 @@ async def health() -> dict:
         "wallet": WALLET_ADDRESS[:6] + "..." + WALLET_ADDRESS[-4:],
     }
 
+# Deploy gate: healthy only when a paid call can work (facilitator accepts our key,
+# the model provider accepts our key, a pay-to wallet is set). Free reads, cached 30s.
+_PAID_HEALTH = {"t": 0.0, "code": 503, "body": None}
+
+
+@app.get("/health/paid", include_in_schema=False)
+async def health_paid():
+    now = time.time()
+    if _PAID_HEALTH["body"] is not None and now - _PAID_HEALTH["t"] < 30:
+        return JSONResponse(_PAID_HEALTH["body"], status_code=_PAID_HEALTH["code"])
+    import httpx
+    checks = {"wallet": WALLET_ADDRESS.startswith("0x") and len(WALLET_ADDRESS) == 42}
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            r = await client.get(FACILITATOR_URL.rstrip("/") + "/supported",
+                                 headers=_cdp_create_headers()["supported"])
+            checks["facilitator"] = r.status_code == 200
+        except Exception:
+            checks["facilitator"] = False
+        try:
+            r = await client.get("https://api.anthropic.com/v1/models", params={"limit": 1},
+                                 headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01"})
+            checks["model_provider"] = r.status_code == 200
+        except Exception:
+            checks["model_provider"] = False
+    ok = all(checks.values())
+    body = {"status": "ok" if ok else "degraded", "checks": checks}
+    _PAID_HEALTH.update(t=now, code=200 if ok else 503, body=body)
+    if not ok:
+        log.warning("health/paid degraded: %s", checks)
+    return JSONResponse(body, status_code=_PAID_HEALTH["code"])
+
+
 # Domain proof for x402 Trust (x402-trust.com/verify). The line holds a public key.
 X402_TRUST_VERIFICATION = "x402-trust-verification=v1:MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPwI5ZjHQiQYvvi0hNCS16GUBGo83PUsxYFM5ArBzcJmI7LnXiHSYVrOXIr2eKzJifP65LBp7Ha4-UWaskztASA"
 
