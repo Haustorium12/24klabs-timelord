@@ -38,7 +38,9 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from x402.http import FacilitatorConfig, HTTPFacilitatorClient, PaymentOption
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
-from x402.http.types import RouteConfig
+from decimal import Decimal
+
+from x402.http.types import HTTPResponseBody, RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 from x402.server import x402ResourceServer
 from x402.extensions.bazaar import bazaar_resource_server_extension
@@ -122,10 +124,45 @@ _TZ_SCHEMA  = {"properties": {"tz": {"type": "string", "description": "IANA time
 _ASK_SCHEMA = {"properties": {"question": {"type": "string", "description": "A temporal question"}}, "required": ["question"]}
 
 
+_V1_NETWORK = {"eip155:8453": "base", "eip155:84532": "base-sepolia"}
+
+
+def _v1_body(price: str, description: str):
+    """402 body hook: mirror the payment requirements into the body in the x402 v1
+    shape, for clients that read the body instead of the PAYMENT-REQUIRED header.
+    The v2 header is unchanged and stays authoritative. Any failure -> no body."""
+    network_v1 = _V1_NETWORK.get(X402_NETWORK)
+    amount = str(int(Decimal(price.lstrip("$")) * 10 ** 6))
+
+    def hook(ctx):
+        if not network_v1:
+            return None
+        try:
+            try:
+                url = ctx.adapter.get_url()
+            except Exception:
+                url = "https://time.24klabs.ai" + (ctx.path or "")
+            return HTTPResponseBody(content_type="application/json", body={
+                "x402Version": 1,
+                "error": "Payment required",
+                "accepts": [{
+                    "scheme": "exact", "network": network_v1, "maxAmountRequired": amount,
+                    "resource": url, "description": description, "mimeType": "application/json",
+                    "payTo": WALLET_ADDRESS, "maxTimeoutSeconds": 300, "asset": USDC_ASSET,
+                    "extra": {"name": "USDC", "version": "2"},
+                }],
+            })
+        except Exception:
+            log.exception("v1 402 body failed; sending empty body")
+            return None
+
+    return hook
+
+
 def _route(price: str, description: str) -> RouteConfig:
     return RouteConfig(
         accepts=[PaymentOption(scheme="exact", price=price, network=X402_NETWORK, pay_to=WALLET_ADDRESS)],
-        description=description,
+        description=description, unpaid_response_body=_v1_body(price, description),
     )
 
 
@@ -133,6 +170,7 @@ def _route_bz(price: str, description: str, name: str, disc) -> RouteConfig:
     return RouteConfig(
         accepts=[PaymentOption(scheme="exact", price=price, network=X402_NETWORK, pay_to=WALLET_ADDRESS)],
         description=description, service_name=name, tags=["time", "24klabs"], extensions=disc,
+        unpaid_response_body=_v1_body(price, description),
     )
 
 
