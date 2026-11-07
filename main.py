@@ -243,6 +243,14 @@ async def health() -> dict:
         "wallet": WALLET_ADDRESS[:6] + "..." + WALLET_ADDRESS[-4:],
     }
 
+# Domain proof for x402 Trust (x402-trust.com/verify). The line holds a public key.
+X402_TRUST_VERIFICATION = "x402-trust-verification=v1:MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPwI5ZjHQiQYvvi0hNCS16GUBGo83PUsxYFM5ArBzcJmI7LnXiHSYVrOXIr2eKzJifP65LBp7Ha4-UWaskztASA"
+
+
+@app.get("/.well-known/x402-trust.txt", include_in_schema=False)
+async def x402_trust_verification():
+    return PlainTextResponse(X402_TRUST_VERIFICATION + "\n")
+
 @app.get("/.well-known/x402.json")
 async def x402_manifest() -> JSONResponse:
     return JSONResponse({
